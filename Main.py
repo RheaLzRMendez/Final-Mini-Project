@@ -43,7 +43,7 @@ def build_main_app(root, username):
 
         root.title("Utilities Suite")
         Login.center_window(root, 1050, 780)
-        root.minsize(900, 680)
+        root.minsize(1, 1)
         root.configure(bg=COLORS["background"])
 
         style = ttk.Style()
@@ -216,7 +216,7 @@ def build_main_app(root, username):
 
         sms_tab = tk.Frame(notebook, bg=COLORS["background"])
         notebook.add(sms_tab, text="  SMS & Email  ")
-        SMS_and_Email.create_gui(sms_tab, own_email=user_email)
+        SMS_and_Email.create_gui(sms_tab, username)
 
         fake_tab = tk.Frame(notebook, bg=COLORS["background"])
         notebook.add(fake_tab, text="  Fake Data Generator  ")
