@@ -1,5 +1,5 @@
 """
-FakeDataGeneration.py - Interactive Calendar Picker & Single Record Modal.
+Customizable batch fake-data generator.
 """
 
 import calendar
@@ -7,7 +7,7 @@ import csv
 import random
 import sqlite3
 import tkinter as tk
-from datetime import date, timedelta
+from datetime import date
 from tkinter import filedialog, messagebox, ttk
 
 from Database import DB_FILE
@@ -17,7 +17,9 @@ MIN_RECORDS = 10
 MAX_RECORDS = 100
 
 FIELDS = [
-    ("full_name", "Full Name"),
+    ("first_name", "First Name"),
+    ("last_name", "Last Name"),
+    ("age", "Age"),
     ("address", "Address"),
     ("birthdate", "Birthdate"),
     ("mobile_number", "Mobile Number"),
@@ -29,8 +31,8 @@ FIELDS = [
     ("country", "Country"),
 ]
 COLUMNS = [column for column, _ in FIELDS]
+FIELD_LABELS = dict(FIELDS)
 
-GENDER_OPTIONS = ["Male", "Female", "Prefer not to say"]
 JOB_OPTIONS = [
     "Student", "N/A", "Software Engineer", "Accountant",
     "Graphic Designer", "Nurse", "Teacher", "Project Manager",
@@ -55,55 +57,95 @@ EMAIL_DOMAINS = ["gmail.com", "yahoo.com", "outlook.com"]
 PHONE_PREFIXES = ["0917", "0918", "0927", "0935", "0956"]
 
 
-def generate_record():
+def generate_record(selected_columns=None):
     gender = random.choice(["Male", "Female"])
     first = random.choice(MALE_NAMES if gender == "Male" else FEMALE_NAMES)
     last = random.choice(LAST_NAMES)
     tag = random.randint(10, 999)
     handle = f"{first}{last}".lower().replace(" ", "")
 
-    birthdate = date.today() - timedelta(days=random.randint(18 * 365, 60 * 365))
+    age = random.randint(18, 60)
+    today = date.today()
+    year = today.year - age
+    day = min(today.day, calendar.monthrange(year, today.month)[1])
+    birthdate = date(year, today.month, day)
     address = f"{random.randint(1, 999)} {random.choice(STREETS)}, {random.choice(CITIES)}"
     mobile = random.choice(PHONE_PREFIXES) + "".join(random.choices("0123456789", k=7))
 
-    return (
-        f"{first} {last}",
-        address,
-        birthdate.strftime("%Y-%m-%d"),
-        mobile,
-        f"{handle}{tag}@{random.choice(EMAIL_DOMAINS)}",
-        gender,
-        f"{handle}{tag}",
-        random.choice([c for c in COMPANY_OPTIONS if c != "N/A"]),
-        random.choice([j for j in JOB_OPTIONS if j not in ("N/A", "Student")]),
-        random.choice([co for co in COUNTRY_OPTIONS if co != "N/A"]),
-    )
+    record = {
+        "first_name": first,
+        "last_name": last,
+        "age": age,
+        "address": address,
+        "birthdate": birthdate.strftime("%Y-%m-%d"),
+        "mobile_number": mobile,
+        "email": f"{handle}{tag}@{random.choice(EMAIL_DOMAINS)}",
+        "gender": gender,
+        "username": f"{handle}{tag}",
+        "company": random.choice([c for c in COMPANY_OPTIONS if c != "N/A"]),
+        "job_title": random.choice([j for j in JOB_OPTIONS if j not in ("N/A", "Student")]),
+        "country": random.choice([co for co in COUNTRY_OPTIONS if co != "N/A"]),
+    }
+    return record if selected_columns is None else {
+        column: record[column] for column in selected_columns
+    }
 
 
 def init_table():
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS fake_records (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            full_name TEXT, address TEXT, birthdate TEXT,
+                            full_name TEXT, first_name TEXT, last_name TEXT, age INTEGER,
+                            address TEXT, birthdate TEXT,
                             mobile_number TEXT, email TEXT, gender TEXT,
                             username TEXT, company TEXT, job_title TEXT,
                             country TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(fake_records)")}
+        migrate_full_names = "full_name" in existing and "first_name" not in existing
+        for column, sql_type in (
+            ("first_name", "TEXT"), ("last_name", "TEXT"), ("age", "INTEGER")
+        ):
+            if column not in existing:
+                conn.execute(f"ALTER TABLE fake_records ADD COLUMN {column} {sql_type}")
+        if migrate_full_names:
+            conn.execute("""UPDATE fake_records
+                            SET first_name = CASE
+                                WHEN instr(trim(full_name), ' ') > 0
+                                THEN substr(trim(full_name), 1, instr(trim(full_name), ' ') - 1)
+                                ELSE trim(full_name)
+                            END,
+                            last_name = CASE
+                                WHEN instr(trim(full_name), ' ') > 0
+                                THEN trim(substr(trim(full_name), instr(trim(full_name), ' ') + 1))
+                                ELSE ''
+                            END,
+                            age = CASE WHEN birthdate IS NOT NULL THEN
+                                CAST(strftime('%Y', 'now') - strftime('%Y', birthdate)
+                                     - (strftime('%m-%d', 'now') < strftime('%m-%d', birthdate))
+                                     AS INTEGER)
+                                ELSE NULL END
+                            WHERE full_name IS NOT NULL""")
 
 
-def save_records(records):
-    placeholders = ", ".join(["?"] * len(COLUMNS))
+def save_records(records, selected_columns=None):
+    selected_columns = selected_columns or COLUMNS
+    placeholders = ", ".join(["?"] * len(selected_columns))
     with sqlite3.connect(DB_FILE) as conn:
         conn.executemany(
-            f"INSERT INTO fake_records ({', '.join(COLUMNS)}) VALUES ({placeholders})",
-            records
+            f"INSERT INTO fake_records ({', '.join(selected_columns)}) VALUES ({placeholders})",
+            [tuple(record.get(column) for column in selected_columns) for record in records]
         )
 
 
-def load_records():
+def load_records(selected_columns=None):
+    if selected_columns is None:
+        selected_columns = COLUMNS
+    if not selected_columns:
+        return []
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
-            f"SELECT id, {', '.join(COLUMNS)} FROM fake_records ORDER BY id DESC"
+            f"SELECT id, {', '.join(selected_columns)} FROM fake_records ORDER BY id DESC"
         ).fetchall()
 
 
@@ -133,13 +175,105 @@ def create_gui(parent):
     ttk.Spinbox(controls, from_=MIN_RECORDS, to=MAX_RECORDS, width=5,
                 textvariable=count_var, font=(FONT, 9)).pack(side="left", padx=(0, 12))
 
+    field_vars = {
+        column: tk.BooleanVar(value=False) for column in COLUMNS
+    }
+    field_frame = tk.LabelFrame(
+        card, text="Columns to generate, preview, and export",
+        font=(FONT, 9, "bold"), bg=COLORS["card"], fg=COLORS["text"],
+        padx=8, pady=4
+    )
+    field_frame.pack(fill="x", pady=(0, 10))
+    inner_frame = tk.Frame(field_frame, bg=COLORS["card"])
+    inner_frame.pack(fill="x", expand=True, padx=20, pady=12)
+    for column in range(4):
+        inner_frame.grid_columnconfigure(column, weight=1, uniform="col_group")
+
+    field_buttons = {}
+
+    def update_field_button(column):
+        selected = field_vars[column].get()
+        background = COLORS["primary"] if selected else COLORS["toggle_inactive"]
+        foreground = "#FFFFFF" if selected else COLORS["toggle_inactive_text"]
+        field_buttons[column].configure(
+            bg=background, fg=foreground,
+            activebackground=background, activeforeground=foreground
+        )
+
+    def toggle_field(column):
+        field_vars[column].set(not field_vars[column].get())
+        update_field_button(column)
+        refresh_table()
+
+    for index, (column, label) in enumerate(FIELDS):
+        button = tk.Button(
+            inner_frame, text=label, font=(FONT, 8, "bold"),
+            relief="flat", cursor="hand2",
+            command=lambda selected=column: toggle_field(selected)
+        )
+        field_buttons[column] = button
+        update_field_button(column)
+        button.grid(
+            row=index // 4, column=index % 4, sticky="ew",
+            padx=10, pady=8, ipady=6
+        )
+
+    def selected_columns():
+        return [column for column in COLUMNS if field_vars[column].get()]
+
+    sort_state = {"column": None, "reverse": False}
+
+    def sort_rows(column, reverse):
+        rows = [(tree.set(item, column), item) for item in tree.get_children("")]
+        try:
+            rows.sort(key=lambda pair: int(pair[0]) if column == "age" else pair[0].casefold(),
+                      reverse=reverse)
+        except ValueError:
+            rows.sort(key=lambda pair: pair[0].casefold(), reverse=reverse)
+        for index, (_, item) in enumerate(rows):
+            tree.move(item, "", index)
+        update_headings()
+
+    def sort_by_column(column):
+        if sort_state["column"] == column:
+            sort_state["reverse"] = not sort_state["reverse"]
+        else:
+            sort_state["column"] = column
+            sort_state["reverse"] = False
+        sort_rows(column, sort_state["reverse"])
+
+    def update_headings():
+        for column in tree["columns"]:
+            arrow = ""
+            if sort_state["column"] == column:
+                arrow = " ▼" if sort_state["reverse"] else " ▲"
+            tree.heading(
+                column, text=f"{FIELD_LABELS[column]}{arrow}",
+                command=lambda selected=column: sort_by_column(selected)
+            )
+
     def refresh_table():
         for item in tree.get_children():
             tree.delete(item)
-        records = load_records()
+        columns = selected_columns()
+        tree.configure(columns=columns)
+        widths = {
+            "first_name": 110, "last_name": 110, "age": 55, "address": 220,
+            "birthdate": 95, "mobile_number": 120, "email": 210, "gender": 90,
+            "username": 130, "company": 150, "job_title": 150, "country": 110
+        }
+        for column in columns:
+            tree.column(column, width=widths[column], minwidth=55, anchor="w")
+        update_headings()
+        records = load_records(columns)
         for rec in records:
             tree.insert("", "end", values=rec[1:])
-        status.config(text=f"Total records in database: {len(records)}")
+        if sort_state["column"] in columns:
+            sort_rows(sort_state["column"], sort_state["reverse"])
+        status.config(
+            text=f"Total records in database: {len(records)}"
+            if columns else "Select at least one column to preview records."
+        )
 
     def handle_generate():
         try:
@@ -150,226 +284,14 @@ def create_gui(parent):
             messagebox.showwarning("Invalid Input", f"Enter a number between {MIN_RECORDS} and {MAX_RECORDS}.")
             return
 
-        recs = [generate_record() for _ in range(count)]
-        save_records(recs)
+        columns = selected_columns()
+        if not columns:
+            messagebox.showwarning("No Columns Selected", "Select at least one field to generate.")
+            return
+        recs = [generate_record(columns) for _ in range(count)]
+        save_records(recs, columns)
         refresh_table()
         messagebox.showinfo("Success", f"Generated and stored {count} fake records!")
-
-    # --- FULLY INTERACTIVE DARK GRID CALENDAR PICKER ---
-    def open_modern_calendar(target_entry, parent_dialog):
-        cal_win = tk.Toplevel(parent_dialog)
-        cal_win.title("Select Birthdate")
-        cal_win.geometry("340x420")
-        cal_win.configure(bg="#18181B")
-        cal_win.transient(parent_dialog)
-        cal_win.grab_set()
-
-        today = date.today()
-        state = {"year": today.year, "month": today.month, "selected_day": today.day}
-
-        header_frame = tk.Frame(cal_win, bg="#18181B", padx=12, pady=12)
-        header_frame.pack(fill="x")
-
-        # Interactive Month and Year Selectors
-        month_names = list(calendar.month_name)[1:]
-        cbo_month = ttk.Combobox(header_frame, values=month_names, width=10, state="readonly", font=(FONT, 9, "bold"))
-        cbo_month.set(calendar.month_name[state["month"]])
-        cbo_month.pack(side="left", padx=(0, 5))
-
-        years = [str(y) for y in range(today.year - 90, today.year + 1)]
-        cbo_year = ttk.Combobox(header_frame, values=years, width=6, state="readonly", font=(FONT, 9, "bold"))
-        cbo_year.set(str(state["year"]))
-        cbo_year.pack(side="left")
-
-        btn_frame = tk.Frame(header_frame, bg="#18181B")
-        btn_frame.pack(side="right")
-
-        grid_frame = tk.Frame(cal_win, bg="#18181B", padx=12, pady=5)
-        grid_frame.pack(fill="both", expand=True)
-
-        days_header = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
-
-        def render_calendar():
-            for child in grid_frame.winfo_children():
-                child.destroy()
-
-            for col_idx, day_name in enumerate(days_header):
-                tk.Label(grid_frame, text=day_name, font=(FONT, 9, "bold"),
-                         bg="#18181B", fg="#A1A1AA", width=4).grid(row=0, column=col_idx, pady=4)
-
-            cal_matrix = calendar.monthcalendar(state["year"], state["month"])
-
-            for row_idx, week in enumerate(cal_matrix, start=1):
-                for col_idx, day in enumerate(week):
-                    if day == 0:
-                        tk.Label(grid_frame, text="", bg="#18181B", width=4).grid(row=row_idx, column=col_idx, pady=2)
-                    else:
-                        is_selected = (day == state["selected_day"])
-                        btn_bg = "#F87171" if is_selected else "#27272A"
-                        btn_fg = "#FFFFFF" if is_selected else "#E4E4E7"
-
-                        def make_cmd(d=day):
-                            def select_cmd():
-                                state["selected_day"] = d
-                                render_calendar()
-                            return select_cmd
-
-                        btn_day = tk.Button(
-                            grid_frame, text=str(day), font=(FONT, 9, "bold" if is_selected else "normal"),
-                            bg=btn_bg, fg=btn_fg, activebackground="#F87171", activeforeground="#FFFFFF",
-                            relief="flat", cursor="hand2", width=3, height=1, command=make_cmd(day)
-                        )
-                        btn_day.grid(row=row_idx, column=col_idx, padx=2, pady=2)
-
-        def on_month_change(event=None):
-            state["month"] = month_names.index(cbo_month.get()) + 1
-            state["selected_day"] = 1
-            render_calendar()
-
-        def on_year_change(event=None):
-            state["year"] = int(cbo_year.get())
-            state["selected_day"] = 1
-            render_calendar()
-
-        cbo_month.bind("<<ComboboxSelected>>", on_month_change)
-        cbo_year.bind("<<ComboboxSelected>>", on_year_change)
-
-        def prev_month():
-            if state["month"] == 1:
-                state["month"] = 12
-                state["year"] -= 1
-            else:
-                state["month"] -= 1
-            cbo_month.set(calendar.month_name[state["month"]])
-            cbo_year.set(str(state["year"]))
-            state["selected_day"] = 1
-            render_calendar()
-
-        def next_month():
-            if state["month"] == 12:
-                state["month"] = 1
-                state["year"] += 1
-            else:
-                state["month"] += 1
-            cbo_month.set(calendar.month_name[state["month"]])
-            cbo_year.set(str(state["year"]))
-            state["selected_day"] = 1
-            render_calendar()
-
-        tk.Button(btn_frame, text="▲", command=prev_month, font=(FONT, 8),
-                  bg="#27272A", fg="#FFFFFF", relief="flat", width=3, cursor="hand2").pack(side="left", padx=2)
-        tk.Button(btn_frame, text="▼", command=next_month, font=(FONT, 8),
-                  bg="#27272A", fg="#FFFFFF", relief="flat", width=3, cursor="hand2").pack(side="left", padx=2)
-
-        def confirm_selection():
-            formatted = f"{state['year']}-{state['month']:02d}-{state['selected_day']:02d}"
-            target_entry.delete(0, tk.END)
-            target_entry.insert(0, formatted)
-            cal_win.destroy()
-
-        footer_frame = tk.Frame(cal_win, bg="#18181B", pady=12)
-        footer_frame.pack(fill="x")
-        tk.Button(footer_frame, text="Confirm Date", command=confirm_selection, font=(FONT, 10, "bold"),
-                  bg="#F87171", fg="#FFFFFF", relief="flat", cursor="hand2", padx=22, pady=6).pack()
-
-        render_calendar()
-
-    def add_single_record_dialog():
-        dialog = tk.Toplevel(parent)
-        dialog.title("Add Single Record")
-        dialog.geometry("480x680")
-        dialog.configure(bg=COLORS["background"])
-        dialog.transient(parent)
-        dialog.grab_set()
-
-        d_card = tk.Frame(dialog, bg=COLORS["card"], padx=20, pady=20,
-                          highlightbackground=COLORS["border"], highlightthickness=1)
-        d_card.pack(fill="both", expand=True, padx=15, pady=15)
-
-        tk.Label(d_card, text="Add Single Record", font=(FONT, 14, "bold"),
-                 bg=COLORS["card"], fg=COLORS["text"]).pack(anchor="w", pady=(0, 10))
-
-        widgets = {}
-
-        for col, label in FIELDS:
-            lbl_frame = tk.Frame(d_card, bg=COLORS["card"])
-            lbl_frame.pack(fill="x", pady=2)
-            tk.Label(lbl_frame, text=label, font=(FONT, 9, "bold"), bg=COLORS["card"],
-                     fg=COLORS["text"], width=13, anchor="w").pack(side="left")
-
-            if col == "gender":
-                cbo = ttk.Combobox(lbl_frame, values=GENDER_OPTIONS, state="readonly", font=(FONT, 9))
-                cbo.pack(side="right", fill="x", expand=True, padx=(5, 0))
-                cbo.set("Male")
-                widgets[col] = cbo
-
-            elif col == "job_title":
-                cbo = ttk.Combobox(lbl_frame, values=JOB_OPTIONS, state="readonly", font=(FONT, 9))
-                cbo.pack(side="right", fill="x", expand=True, padx=(5, 0))
-                cbo.set("Student")
-                widgets[col] = cbo
-
-            elif col == "company":
-                cbo = ttk.Combobox(lbl_frame, values=COMPANY_OPTIONS, state="readonly", font=(FONT, 9))
-                cbo.pack(side="right", fill="x", expand=True, padx=(5, 0))
-                cbo.set("N/A")
-                widgets[col] = cbo
-
-            elif col == "country":
-                cbo = ttk.Combobox(lbl_frame, values=COUNTRY_OPTIONS, state="readonly", font=(FONT, 9))
-                cbo.pack(side="right", fill="x", expand=True, padx=(5, 0))
-                cbo.set("Philippines")
-                widgets[col] = cbo
-
-            elif col == "birthdate":
-                b_frame = tk.Frame(lbl_frame, bg=COLORS["card"])
-                b_frame.pack(side="right", fill="x", expand=True, padx=(5, 0))
-
-                ent = tk.Entry(b_frame, font=(FONT, 9), bg=COLORS["input"], fg=COLORS["text"],
-                               relief="flat", highlightthickness=1, highlightbackground=COLORS["border"])
-                ent.pack(side="left", fill="x", expand=True, ipady=3)
-                ent.insert(0, date.today().strftime("%Y-%m-%d"))
-
-                btn_cal = tk.Button(b_frame, text="📅 Calendar", command=lambda target=ent: open_modern_calendar(target, dialog),
-                                    font=(FONT, 8, "bold"), bg=COLORS["input"], fg=COLORS["primary_dark"],
-                                    relief="flat", cursor="hand2")
-                btn_cal.pack(side="right", padx=(4, 0))
-                widgets[col] = ent
-
-            else:
-                ent = tk.Entry(lbl_frame, font=(FONT, 9), bg=COLORS["input"], fg=COLORS["text"],
-                               relief="flat", highlightthickness=1, highlightbackground=COLORS["border"])
-                ent.pack(side="right", fill="x", expand=True, padx=(5, 0), ipady=3)
-                widgets[col] = ent
-
-        def autofill():
-            fake = generate_record()
-            for (col, _), val in zip(FIELDS, fake):
-                w = widgets[col]
-                if isinstance(w, ttk.Combobox):
-                    w.set(val)
-                else:
-                    w.delete(0, tk.END)
-                    w.insert(0, val)
-
-        def save_single():
-            row_data = [widgets[col].get().strip() for col, _ in FIELDS]
-            if not any(row_data):
-                messagebox.showwarning("Empty Form", "Please fill in at least one field.", parent=dialog)
-                return
-            save_records([tuple(row_data)])
-            refresh_table()
-            dialog.destroy()
-            messagebox.showinfo("Saved", "Record added successfully!")
-
-        btn_box = tk.Frame(d_card, bg=COLORS["card"])
-        btn_box.pack(fill="x", pady=(15, 0))
-
-        tk.Button(btn_box, text="Auto-Fill Fake Data", command=autofill, font=(FONT, 9, "bold"),
-                  bg=COLORS["input"], fg=COLORS["primary_dark"], relief="flat", cursor="hand2", padx=10, pady=6).pack(side="left")
-
-        tk.Button(btn_box, text="Save Record", command=save_single, font=(FONT, 9, "bold"),
-                  bg=COLORS["primary"], fg="white", relief="flat", cursor="hand2", padx=16, pady=6).pack(side="right")
 
     def handle_clear():
         if messagebox.askyesno("Confirm", "Delete all stored fake records?"):
@@ -377,7 +299,11 @@ def create_gui(parent):
             refresh_table()
 
     def handle_export():
-        records = load_records()
+        columns = selected_columns()
+        if not columns:
+            messagebox.showwarning("No Columns Selected", "Select at least one field to export.")
+            return
+        records = load_records(columns)
         if not records:
             messagebox.showinfo("No Data", "There are no records to export.")
             return
@@ -389,7 +315,7 @@ def create_gui(parent):
         if filepath:
             with open(filepath, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([label for _, label in FIELDS])
+                writer.writerow([FIELD_LABELS[column] for column in columns])
                 for rec in records:
                     writer.writerow(rec[1:])
             messagebox.showinfo("Exported", "Data exported successfully!")
@@ -407,7 +333,6 @@ def create_gui(parent):
         return btn
 
     make_button("Batch Generate", handle_generate, primary=True)
-    make_button("+ Add Single Record", add_single_record_dialog)
     make_button("Export CSV", handle_export)
     make_button("Clear Records", handle_clear)
 
@@ -421,17 +346,16 @@ def create_gui(parent):
     style.configure("FDG.Treeview.Heading", font=(FONT, 9, "bold"),
                     background=COLORS["light"], foreground=COLORS["text"])
 
-    tree = ttk.Treeview(table_frame, style="FDG.Treeview", columns=COLUMNS, show="headings", height=11)
-    widths = {"full_name": 140, "address": 220, "birthdate": 90, "mobile_number": 110,
-              "email": 210, "gender": 70, "username": 130, "company": 150,
-              "job_title": 150, "country": 110}
+    tree = ttk.Treeview(table_frame, style="FDG.Treeview", columns=(), show="headings", height=11)
 
-    for column, label in FIELDS:
-        tree.heading(column, text=label)
-        tree.column(column, width=widths[column], minwidth=70, anchor="w")
-
-    y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-    x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+    y_scroll = ttk.Scrollbar(
+        table_frame, orient="vertical", style="Vertical.TScrollbar",
+        command=tree.yview
+    )
+    x_scroll = ttk.Scrollbar(
+        table_frame, orient="horizontal", style="Horizontal.TScrollbar",
+        command=tree.xview
+    )
     tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
     table_frame.rowconfigure(0, weight=1)

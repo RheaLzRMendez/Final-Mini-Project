@@ -57,10 +57,19 @@ def register_user(username, email, password, confirm):
                          (username, email, salt, hash_password(password, salt)))
     except sqlite3.IntegrityError:
         with sqlite3.connect(DB_FILE) as conn:
-            taken = conn.execute("SELECT 1 FROM users WHERE username = ?",
-                                 (username,)).fetchone()
-        return False, ("That username is already taken." if taken
-                       else "That email is already registered.")
+            email_taken = conn.execute(
+                "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE",
+                (email,)
+            ).fetchone()
+            username_taken = conn.execute(
+                "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE",
+                (username,)
+            ).fetchone()
+        if email_taken:
+            return False, "Account already exists with that email"
+        if username_taken:
+            return False, "That username is already taken."
+        raise
     return True, "Account created successfully. You can log in now."
 
 

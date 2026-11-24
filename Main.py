@@ -12,7 +12,7 @@ import URL_Shortening
 import SMS_and_Email
 import FakeDataGeneration
 from Database import DB_FILE
-from theme_manager import COLORS, FONT, toggle_theme
+from theme_manager import COLORS, FONT, configure_scrollbar_style, toggle_theme
 
 
 def get_user_info(username):
@@ -48,6 +48,7 @@ def build_main_app(root, username):
 
         style = ttk.Style()
         style.theme_use("clam")
+        configure_scrollbar_style(style)
 
         style.configure("TNotebook", background=COLORS["background"], borderwidth=0)
         style.configure(
@@ -214,8 +215,8 @@ def build_main_app(root, username):
         URL_Shortening.create_gui(url_tab)
 
         sms_tab = tk.Frame(notebook, bg=COLORS["background"])
-        notebook.add(sms_tab, text="  SMS & Email Dispatch  ")
-        SMS_and_Email.create_gui(sms_tab)
+        notebook.add(sms_tab, text="  SMS & Email  ")
+        SMS_and_Email.create_gui(sms_tab, own_email=user_email)
 
         fake_tab = tk.Frame(notebook, bg=COLORS["background"])
         notebook.add(fake_tab, text="  Fake Data Generator  ")
