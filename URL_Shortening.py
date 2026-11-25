@@ -1,14 +1,10 @@
 """URL_Shortening.py"""
 
-import hashlib
-import random
 import sqlite3
-import string
 import tkinter as tk
 from tkinter import messagebox
 import urllib.parse
 import urllib.request
-from urllib.error import HTTPError, URLError
 
 from Database import DB_FILE
 from URL_Shtng_style import COLORS, FONT
@@ -30,10 +26,24 @@ def save_url(original_url, short_url):
         )
 
 
-def generate_local_short_url(original_url, domain="https://short.ly/"):
-    """Generates a reliable local shortened URL code without needing internet API calls."""
-    code = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
-    return f"{domain}{code}"
+def shorten_url(original_url):
+    """Create a working short link through TinyURL."""
+    api_url = "https://tinyurl.com/api-create.php?" + urllib.parse.urlencode(
+        {"url": original_url}
+    )
+    request = urllib.request.Request(
+        api_url,
+        headers={"User-Agent": "UtilitiesApplication/1.0"},
+    )
+
+    with urllib.request.urlopen(request, timeout=4) as response:
+        short_url = response.read().decode("utf-8").strip()
+
+    parsed_url = urllib.parse.urlparse(short_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise ValueError("The shortening service returned an invalid response.")
+
+    return short_url
 
 
 def create_gui(parent):
@@ -107,21 +117,17 @@ def create_gui(parent):
         status_label.config(text="Generating your shortened link...")
         frame.update_idletasks()
 
-        short_url = None
-
-        # 1. Try online API service
         try:
-            api_url = f"https://is.gd/create.php?format=simple&{urllib.parse.urlencode({'url': original_url})}"
-            request = urllib.request.Request(api_url, headers={"User-Agent": "UtilitiesApplication/1.0"})
+            try:
+                short_url = shorten_url(original_url)
+            except (OSError, UnicodeError, ValueError) as error:
+                status_label.config(text="Unable to shorten the URL.")
+                messagebox.showerror(
+                    "Shortening Failed",
+                    f"The shortening service could not create a link:\n{error}",
+                )
+                return
 
-            with urllib.request.urlopen(request, timeout=4) as response:
-                short_url = response.read().decode("utf-8").strip()
-
-        except Exception:
-            # 2. Fallback to offline generator if network is unreachable
-            short_url = generate_local_short_url(original_url)
-
-        try:
             save_url(original_url, short_url)
             display_result(short_url)
             status_label.config(text="URL shortened and saved to database!")

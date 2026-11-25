@@ -1,22 +1,19 @@
 """SMS and email dispatcher with persistent delivery history."""
 
-import json
 import os
 import queue
 import re
-import smtplib
 import sqlite3
 import threading
 import tkinter as tk
 import uuid
 from datetime import datetime
-from email.message import EmailMessage
 from tkinter import messagebox, ttk
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from Database import DB_FILE
 from SMS_and_Eml_style import COLORS, FONT
+import email_provider
+import sms_provider
 
 try:
     from winotify import Notification as WindowsNotification
@@ -37,6 +34,62 @@ def is_valid_email_recipient(recipient):
 def is_valid_sms_recipient(recipient):
     digits = re.sub(r"\D", "", recipient)
     return bool(PHONE_PATTERN.fullmatch(recipient)) and 7 <= len(digits) <= 15
+
+
+def dispatch_sms(account_sid, auth_token, from_number, recipient, body):
+    if not sms_provider.is_configured(account_sid, auth_token, from_number):
+        return (
+            True,
+            "SIMULATED (Twilio credentials not set)",
+            "No SMS was sent. Enter Twilio credentials in SMS Settings to send live.",
+        )
+
+    try:
+        message_sid, initial_status = sms_provider.send_sms(
+            account_sid,
+            auth_token,
+            from_number,
+            recipient,
+            body,
+        )
+    except sms_provider.TwilioAPIError as error:
+        return False, "Failed via Twilio SMS", str(error)
+
+    try:
+        delivery_status = sms_provider.get_message_status(
+            account_sid,
+            auth_token,
+            message_sid,
+        )
+    except sms_provider.TwilioAPIError as error:
+        return (
+            True,
+            f"Twilio accepted; status unavailable ({message_sid})",
+            f"Twilio accepted message {message_sid} with initial status "
+            f"{initial_status}; delivery status check failed: {error}",
+        )
+
+    status = f"Twilio {delivery_status} ({message_sid})"
+    detail = f"Twilio message {message_sid} delivery status: {delivery_status}."
+    if delivery_status.lower() in {"failed", "undelivered", "canceled"}:
+        return False, status, detail
+    return True, status, detail
+
+
+def dispatch_email(sender, app_password, recipient, subject, body):
+    if not sender or not app_password:
+        return (
+            True,
+            "SIMULATED (Gmail SMTP credentials not set)",
+            "No email was sent. Set SENDER_GMAIL and GMAIL_APP_PASSWORD to enable Gmail SMTP.",
+        )
+    return email_provider.send_email(
+        sender,
+        app_password,
+        recipient,
+        subject,
+        body,
+    )
 
 
 def init_message_db():
@@ -120,7 +173,197 @@ def create_gui(parent, username):
         tk.Label(parent_widget, text=text, font=(FONT, 9, "bold"),
                  bg=COLORS["card"], fg=COLORS["text"]).pack(anchor="w", pady=(7, 3))
 
-    add_label(left_form, "Message Channel")
+    twilio_settings = {
+        "account_sid": os.environ.get("TWILIO_ACCOUNT_SID", "").strip(),
+        "auth_token": os.environ.get("TWILIO_AUTH_TOKEN", "").strip(),
+        "from_number": os.environ.get("TWILIO_PHONE_NUMBER", "").strip(),
+    }
+    email_settings = {
+        "sender": os.environ.get("SENDER_GMAIL", "").strip(),
+        "app_password": "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split()),
+    }
+
+    def update_provider_modes():
+        sms_is_live = sms_provider.is_configured(
+            twilio_settings["account_sid"],
+            twilio_settings["auth_token"],
+            twilio_settings["from_number"],
+        )
+        sms_mode_label.config(
+            text=f"SMS {'LIVE' if sms_is_live else 'SIMULATED'}",
+            bg=COLORS["success"] if sms_is_live else COLORS["secondary"],
+        )
+        email_is_live = bool(
+            email_settings["sender"] and email_settings["app_password"]
+        )
+        email_mode_label.config(
+            text=f"EMAIL {'LIVE' if email_is_live else 'SIMULATED'}",
+            bg=COLORS["success"] if email_is_live else COLORS["secondary"],
+        )
+
+    def open_sms_settings():
+        dialog = tk.Toplevel(frame)
+        dialog.title("SMS Settings")
+        dialog.transient(frame.winfo_toplevel())
+        dialog.resizable(False, False)
+        dialog.configure(bg=COLORS["card"])
+
+        dialog_body = tk.Frame(dialog, bg=COLORS["card"], padx=20, pady=18)
+        dialog_body.pack(fill="both", expand=True)
+        tk.Label(
+            dialog_body,
+            text="Twilio SMS Settings",
+            font=(FONT, 13, "bold"),
+            bg=COLORS["card"],
+            fg=COLORS["text"],
+        ).pack(anchor="w")
+        tk.Label(
+            dialog_body,
+            text="Credentials stay in memory for this run. Leave all fields empty to use the simulator.",
+            font=(FONT, 8),
+            bg=COLORS["card"],
+            fg=COLORS["secondary"],
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        entries = {}
+        for key, label in (
+            ("account_sid", "Account SID"),
+            ("auth_token", "Auth Token"),
+            ("from_number", "Twilio Phone Number"),
+        ):
+            tk.Label(
+                dialog_body,
+                text=label,
+                font=(FONT, 9, "bold"),
+                bg=COLORS["card"],
+                fg=COLORS["text"],
+            ).pack(anchor="w", pady=(5, 3))
+            entry = tk.Entry(
+                dialog_body,
+                font=(FONT, 10),
+                bg=COLORS["input"],
+                fg=COLORS["text"],
+                relief="flat",
+                highlightthickness=1,
+                highlightbackground=COLORS["border"],
+                show="*" if key == "auth_token" else "",
+            )
+            entry.pack(fill="x", ipady=6)
+            entry.insert(0, twilio_settings[key])
+            entries[key] = entry
+
+        def save_settings():
+            values = {
+                key: entry.get().strip()
+                for key, entry in entries.items()
+            }
+            if any(values.values()) and not all(values.values()):
+                messagebox.showwarning(
+                    "Incomplete SMS Settings",
+                    "Enter the Account SID, Auth Token, and Twilio phone number, "
+                    "or clear all three to use the simulator.",
+                    parent=dialog,
+                )
+                return
+            twilio_settings.update(values)
+            update_provider_modes()
+            dialog.destroy()
+
+        def use_simulator():
+            for entry in entries.values():
+                entry.delete(0, tk.END)
+            save_settings()
+
+        actions = tk.Frame(dialog_body, bg=COLORS["card"])
+        actions.pack(fill="x", pady=(14, 0))
+        tk.Button(
+            actions,
+            text="Use Simulator",
+            command=use_simulator,
+            font=(FONT, 9),
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            relief="flat",
+            cursor="hand2",
+            padx=10,
+            pady=6,
+        ).pack(side="left")
+        tk.Button(
+            actions,
+            text="Cancel",
+            command=dialog.destroy,
+            font=(FONT, 9),
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            relief="flat",
+            cursor="hand2",
+            padx=10,
+            pady=6,
+        ).pack(side="right", padx=(6, 0))
+        tk.Button(
+            actions,
+            text="Save",
+            command=save_settings,
+            font=(FONT, 9, "bold"),
+            bg=COLORS["primary"],
+            fg="#FFFFFF",
+            relief="flat",
+            cursor="hand2",
+            padx=12,
+            pady=6,
+        ).pack(side="right")
+        dialog.update_idletasks()
+        dialog.geometry(f"+{frame.winfo_rootx() + 120}+{frame.winfo_rooty() + 100}")
+        dialog.grab_set()
+
+    channel_header = tk.Frame(left_form, bg=COLORS["card"])
+    channel_header.pack(fill="x")
+    tk.Label(
+        channel_header,
+        text="Message Channel",
+        font=(FONT, 9, "bold"),
+        bg=COLORS["card"],
+        fg=COLORS["text"],
+    ).pack(side="left", pady=(7, 3))
+    tk.Button(
+        channel_header,
+        text="SMS Settings",
+        command=open_sms_settings,
+        font=(FONT, 8, "bold"),
+        bg=COLORS["input"],
+        fg=COLORS["text"],
+        relief="flat",
+        cursor="hand2",
+        padx=8,
+        pady=4,
+    ).pack(side="right")
+
+    mode_status_row = tk.Frame(left_form, bg=COLORS["card"])
+    mode_status_row.pack(fill="x", pady=(2, 0))
+    sms_mode_label = tk.Label(
+        mode_status_row,
+        text="SMS SIMULATED",
+        font=(FONT, 8, "bold"),
+        bg=COLORS["secondary"],
+        fg="#FFFFFF",
+        padx=7,
+        pady=4,
+    )
+    sms_mode_label.pack(side="right")
+    email_mode_label = tk.Label(
+        mode_status_row,
+        text="EMAIL SIMULATED",
+        font=(FONT, 8, "bold"),
+        bg=COLORS["secondary"],
+        fg="#FFFFFF",
+        padx=7,
+        pady=4,
+    )
+    email_mode_label.pack(side="right", padx=(0, 7))
+    update_provider_modes()
+
     message_type = ttk.Combobox(
         left_form, values=["Email", "SMS"], state="readonly", font=(FONT, 10)
     )
@@ -349,7 +592,7 @@ def create_gui(parent, username):
             justify="left", anchor="w"
         ).pack(fill="x", anchor="w", pady=(8 if not subject_line else 0, 5))
         tk.Label(
-            card, text=f"Sent: {timestamp}", font=(FONT, 8),
+            card, text=f"Time: {timestamp}", font=(FONT, 8),
             bg=COLORS["card"], fg=COLORS["secondary"], anchor="w"
         ).pack(fill="x", pady=(2, 5))
         delivery_status = tk.Label(
@@ -371,17 +614,19 @@ def create_gui(parent, username):
         def finish_delivery(success, status):
             if notification.winfo_exists():
                 if mode == "SMS":
-                    title_text = (
-                        f"📱 SMS Sent to {recipient}: {preview}"
-                        if success else f"📱 SMS Failed for {recipient}"
-                    )
-                elif status.startswith("Simulated"):
-                    title_text = f"✉️ Email Simulated to {recipient}"
+                    if not success:
+                        title_text = f"📱 SMS Failed for {recipient}"
+                    elif status.startswith("SIMULATED"):
+                        title_text = f"📱 SMS Simulated to {recipient}"
+                    else:
+                        title_text = f"📱 SMS Accepted by Twilio for {recipient}"
                 else:
-                    title_text = (
-                        f"✉️ Email Delivered to {recipient}"
-                        if success else f"✉️ Email Failed for {recipient}"
-                    )
+                    if not success:
+                        title_text = f"✉️ Email Failed for {recipient}"
+                    elif status.startswith("SIMULATED"):
+                        title_text = f"✉️ Email Simulated to {recipient}"
+                    else:
+                        title_text = f"✉️ Email Accepted by Gmail for {recipient}"
                 title.config(text=title_text)
                 delivery_status.config(
                     text=f"{'Complete ✓' if success else 'Failed'} · Status: {status}",
@@ -408,57 +653,19 @@ def create_gui(parent, username):
 
     def dispatch_message(mode, recipient, subject, body):
         if mode == "Email":
-            sender = os.environ.get("SENDER_GMAIL", "").strip()
-            app_password = "".join(os.environ.get("GMAIL_APP_PASSWORD", "").split())
-            if not sender or not app_password:
-                return (
-                    True,
-                    "Simulated SMTP (Gmail credentials not configured)",
-                    "Real Gmail delivery is not configured. Set SENDER_GMAIL and "
-                    "GMAIL_APP_PASSWORD to your Gmail address and 16-character "
-                    "Google App Password (Google Account → Security → 2-Step Verification → App passwords)."
-                )
-            if len(app_password) != 16:
-                return (
-                    False,
-                    "Failed via Gmail SMTP",
-                    "GMAIL_APP_PASSWORD must be the 16-character Google App Password."
-                )
-
-            try:
-                email = EmailMessage()
-                email["From"] = sender
-                email["To"] = recipient
-                email["Subject"] = subject or "(no subject)"
-                email.set_content(body)
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
-                    smtp.login(sender, app_password)
-                    smtp.send_message(email)
-            except (smtplib.SMTPException, OSError, ValueError) as error:
-                return False, "Failed via Gmail SMTP", str(error)
-            return True, "Delivered via Gmail SMTP", ""
-
-        payload = json.dumps({
-            "phone_number": recipient,
-            "message": body
-        }).encode("utf-8")
-        request = Request(
-            "https://httpbin.org/post",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        try:
-            with urlopen(request, timeout=15) as response:
-                if not 200 <= response.getcode() < 300:
-                    raise URLError(f"Sandbox returned HTTP {response.getcode()}.")
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-            return False, "Failed via HTTPBin SMS sandbox", str(error)
-        return (
-            True,
-            "POST accepted by HTTPBin sandbox (not a carrier SMS)",
-            "SMS payload was posted to https://httpbin.org/post; this endpoint "
-            "simulates a carrier request and does not send an actual SMS."
+            return dispatch_email(
+                email_settings["sender"],
+                email_settings["app_password"],
+                recipient,
+                subject,
+                body,
+            )
+        return dispatch_sms(
+            twilio_settings["account_sid"],
+            twilio_settings["auth_token"],
+            twilio_settings["from_number"],
+            recipient,
+            body,
         )
 
     result_queue = queue.Queue()
@@ -541,13 +748,18 @@ def create_gui(parent, username):
                 preview = preview[:157].rstrip() + "..."
             if success:
                 if mode == "SMS":
-                    notification_title = f"📱 SMS Sent to {recipient}: {preview}"
-                    notification_body = "HTTPBin sandbox accepted the test request; no SMS was sent."
-                elif status.startswith("Simulated"):
-                    notification_title = f"✉️ Email Simulated to {recipient}"
-                    notification_body = f"Subject: {subject or '(no subject)'}"
+                    if status.startswith("SIMULATED"):
+                        notification_title = f"📱 SMS Simulated to {recipient}: {preview}"
+                        notification_body = "No SMS was sent. Configure Twilio to send live."
+                    else:
+                        notification_title = f"📱 SMS Accepted by Twilio for {recipient}"
+                        notification_body = status
                 else:
-                    notification_title = f"✉️ Email Delivered to {recipient}"
+                    notification_title = (
+                        f"✉️ Email Simulated to {recipient}"
+                        if status.startswith("SIMULATED")
+                        else f"✉️ Email Accepted by Gmail for {recipient}"
+                    )
                     notification_body = f"Subject: {subject or '(no subject)'}"
                 notification_note = show_windows_notification(
                     notification_title, notification_body
@@ -560,7 +772,7 @@ def create_gui(parent, username):
                     f"{status}:\n{detail or 'The remote service rejected the message.'}",
                     parent=frame
                 )
-            send_button.config(text="Simulate Send", state="normal")
+            send_button.config(text="Send Message", state="normal")
         frame.after(100, poll_dispatch_results)
 
     def send_message():
@@ -591,7 +803,7 @@ def create_gui(parent, username):
 
         content = f"Subject: {subject}\n\n{body}" if subject else body
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        reference = f"SIM-{uuid.uuid4().hex[:12].upper()}"
+        reference = f"MSG-{uuid.uuid4().hex[:12].upper()}"
         recipient_entry.delete(0, tk.END)
         subject_entry.delete(0, tk.END)
         message_box.delete("1.0", tk.END)
@@ -626,7 +838,7 @@ def create_gui(parent, username):
         try:
             threading.Thread(target=worker, daemon=True).start()
         except RuntimeError as error:
-            send_button.config(text="Simulate Send", state="normal")
+            send_button.config(text="Send Message", state="normal")
             complete_notification(False, "Could not start background delivery")
             append_system_log(f"Could not start dispatch thread: {error}")
             messagebox.showerror(
@@ -634,7 +846,7 @@ def create_gui(parent, username):
             )
 
     send_button = tk.Button(
-        left_form, text="Simulate Send", command=send_message,
+        left_form, text="Send Message", command=send_message,
         font=(FONT, 10, "bold"), bg=COLORS["primary"], fg="white",
         activebackground=COLORS["primary_dark"], activeforeground="white",
         relief="flat", cursor="hand2", padx=22, pady=9
